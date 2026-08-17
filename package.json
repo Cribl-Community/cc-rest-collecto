@@ -34,7 +34,12 @@
   },
   "displayName": "REST Collecto",
   "description": "Helps you build a REST Collector from an Open API Spec",
-  "author": "gblock@cribl.io",
+  "author": "Glenn Block - gblock@cribl.io",
+  "tags": {
+    "product": [
+      "stream"
+    ]
+  },
   "cribl": {
     "type": "app",
     "createAppScriptVersion": "0.1.0"
