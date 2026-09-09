@@ -1,12 +1,6 @@
-export type BedrockChunk =
-  | { type: 'text'; text: string }
-  | { type: 'done' }
-  | { type: 'error'; error: string };
-
-interface BedrockMessage {
-  role: 'user' | 'assistant';
-  content: string;
-}
+// Type-only import — erased at compile time, so there is no runtime cycle with
+// aiStream.ts (which imports `streamBedrock` from here).
+import type { AiMessage, ChatChunk } from './aiStream';
 
 function criblApiBase(): string {
   return (window as unknown as { CRIBL_API_URL?: string }).CRIBL_API_URL ?? '/api/v1';
@@ -41,14 +35,14 @@ async function writeBedrockAuthToKv(authValue: string): Promise<void> {
  * Response format: AWS binary EventStream frames (NOT SSE).
  */
 export async function* streamBedrock(
-  messages: BedrockMessage[],
+  messages: AiMessage[],
   modelId: string,
   region: string,
   accessKeyId: string,
   secretAccessKey: string,
   systemPrompt: string,
   signal?: AbortSignal,
-): AsyncGenerator<BedrockChunk> {
+): AsyncGenerator<ChatChunk> {
   const endpoint = `https://bedrock-runtime.${region}.amazonaws.com/model/${encodeURIComponent(modelId)}/invoke-with-response-stream`;
 
   const body = JSON.stringify({
