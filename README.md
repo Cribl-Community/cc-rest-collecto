@@ -30,7 +30,7 @@ REST Collecto is an app that helps you create and manage [Cribl REST Collector](
    - **OpenAPI Spec** — paste or fetch a spec to use the guided wizard.
    - **AI Builder** — describe what you want to collect and let the LLM do the work.
 
-If you plan to use the AI Builder, go to **Settings** first and configure your AI provider (Anthropic or AWS Bedrock) — see [AI Provider Setup](#ai-provider-setup) below.
+If you plan to use the AI Builder, go to **Settings** first and configure your AI provider (Anthropic, AWS Bedrock, or Google Gemini) — see [AI Provider Setup](#ai-provider-setup) below.
 
 ---
 
@@ -76,34 +76,34 @@ Inspect the generated `SavedJob` JSON, then:
 
 ## AI Provider Setup
 
-The AI Builder supports two LLM providers. Go to **Settings** to configure your preferred one.
+The AI Builder supports three LLM providers. Go to **Settings**, pick a provider, enter its credentials, and choose a model.
 
-### Anthropic
+| Provider | Credentials needed | Get a key |
+|---|---|---|
+| **Anthropic** | API key | [console.anthropic.com](https://console.anthropic.com/settings/keys) |
+| **AWS Bedrock** | Region, Access Key ID, Secret Access Key | AWS IAM |
+| **Google Gemini** | API key | [aistudio.google.com](https://aistudio.google.com/apikey) |
 
-Select **Anthropic** in the provider toggle, paste your API key, and choose a model. The key is stored in the Cribl KV store and injected by the platform proxy — it never appears in browser requests.
+Each provider stores its own credentials and its own model choice, so you can switch between them without re-entering anything.
 
-| Model | Notes |
-|---|---|
-| Claude Sonnet 4.5 | Recommended — fast and capable |
-| Claude Opus 4.5 | Most capable, slower |
-| Claude Haiku 3.5 | Fastest, lighter tasks |
+### How credentials are protected
 
-Get a key at [console.anthropic.com](https://console.anthropic.com/settings/keys).
+Keys are written to the Cribl KV store **encrypted** (`?encrypted=true`) and injected into outgoing requests server-side by the platform proxy, using the `headers.inject` rules in [`config/proxies.yml`](config/proxies.yml). They never appear in a browser request.
 
-### AWS Bedrock
+AWS Bedrock is the one exception: each request has to be SigV4-signed, which happens in the browser. The signed `Authorization` value is written to KV and injected by the proxy, so the AWS credentials themselves are still never sent to Bedrock directly from the browser.
 
-Select **AWS Bedrock** in the provider toggle, choose a region, and enter your IAM Access Key ID and Secret Access Key.
+### Choosing a model
 
-| Model | Notes |
-|---|---|
-| Claude Sonnet 4.6 (Bedrock) | Recommended |
-| Claude Opus 4.6 (Bedrock) | Most capable |
-| Claude Sonnet 4.5 (Bedrock) | |
-| Claude Haiku 4.5 (Bedrock) | Fastest |
+Each provider ships with a short curated list, but model IDs change faster than a packaged app does. Two escape hatches:
+
+- **Refresh from provider** — lists the models your credentials can actually reach (Anthropic and Gemini).
+- **Custom…** — type any model ID directly.
+
+### AWS Bedrock notes
 
 **Supported regions:** `us-east-1`, `us-west-2`, `eu-west-1`, `eu-central-1`, `ap-northeast-1`, `ap-southeast-1`, `ap-southeast-2`
 
-The IAM user or role must have the `bedrock:InvokeModelWithResponseStream` permission. Credentials are stored in the Cribl KV store. Each request is signed with AWS SigV4 in the browser; the signed `Authorization` value is written to KV and injected by the Cribl platform proxy before the request reaches Bedrock — credentials are never sent directly from the browser.
+The IAM user or role must have the `bedrock:InvokeModelWithResponseStream` permission.
 
 ---
 

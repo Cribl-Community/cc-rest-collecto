@@ -1,8 +1,16 @@
+# External domains this app is allowed to reach.
+#
+# API keys live in the app's KV store (written encrypted by the Settings page)
+# and are injected server-side by the platform proxy via `headers.inject`, so
+# they never appear in a browser request.
+
+# ── Anthropic ─────────────────────────────────────────────────────────────────
 api.anthropic.com:
   timeout: 120000
   paths:
     allowlist:
       - /v1/messages
+      - /v1/models
   headers:
     inject:
       x-api-key: kv.anthropicApiKey
@@ -11,7 +19,22 @@ api.anthropic.com:
       - content-type
       - accept
 
-# AWS Bedrock — common regions
+# ── Google Gemini ─────────────────────────────────────────────────────────────
+# Covers both `/v1beta/models` (list) and
+# `/v1beta/models/{model}:streamGenerateContent` (chat).
+generativelanguage.googleapis.com:
+  timeout: 120000
+  paths:
+    allowlist:
+      - /v1beta/models
+  headers:
+    inject:
+      x-goog-api-key: kv.geminiApiKey
+    allowlist:
+      - content-type
+      - accept
+
+# ── AWS Bedrock ───────────────────────────────────────────────────────────────
 # Authorization is SigV4-signed per-request in the browser, written to KV key
 # `bedrockAuth` immediately before each fetch, and injected here by the proxy.
 bedrock-runtime.us-east-1.amazonaws.com:

@@ -2,11 +2,10 @@ import { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWizard } from '../context/WizardContext';
 import {
-  getStoredModel, hasApiKey,
-  getStoredProvider, getStoredBedrockCreds, hasBedrockCreds, DEFAULT_BEDROCK_MODEL,
-  type AIProvider, type BedrockCreds,
+  getStoredModel, getStoredProvider, getProviderCreds, isProviderConfigured, providerDef,
+  type AIProvider, type ProviderCreds,
 } from '../utils/settings';
-import { streamBedrock } from '../utils/bedrock';
+import { streamChat } from '../utils/aiStream';
 import type { CollectorConfig, ScheduleConfig } from '../context/WizardContext';
 import { saveProject, loadProject, deriveProjectName } from '../utils/projectStorage';
 import type { ChatMessage } from '../utils/projectStorage';
@@ -315,7 +314,7 @@ export function ChatPage() {
   const [apiKeyOk, setApiKeyOk] = useState<boolean | null>(null);
   const [model, setModel] = useState('claude-sonnet-4-5');
   const [provider, setProvider] = useState<AIProvider>('anthropic');
-  const [bedrockCreds, setBedrockCreds] = useState<BedrockCreds>({ region: 'us-east-1', accessKeyId: '', secretAccessKey: '' });
+  const [creds, setCreds] = useState<ProviderCreds>({});
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -323,22 +322,16 @@ export function ChatPage() {
 
   useEffect(() => {
     async function init() {
-      const [p, ok, m, bedrockOk, creds] = await Promise.all([
-        getStoredProvider(),
-        hasApiKey(),
-        getStoredModel(),
-        hasBedrockCreds(),
-        getStoredBedrockCreds(),
+      const p = await getStoredProvider();
+      const [ok, m, c] = await Promise.all([
+        isProviderConfigured(p),
+        getStoredModel(p),
+        getProviderCreds(p),
       ]);
       setProvider(p);
-      setBedrockCreds(creds);
-      if (p === 'bedrock') {
-        setApiKeyOk(bedrockOk);
-        setModel(DEFAULT_BEDROCK_MODEL);
-      } else {
-        setApiKeyOk(ok);
-        setModel(m);
-      }
+      setApiKeyOk(ok);
+      setModel(m);
+      setCreds(c);
     }
     init();
   }, []);
@@ -371,79 +364,25 @@ export function ChatPage() {
       let assistantText = '';
       setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
 
-      if (provider === 'bedrock') {
-        // ── Bedrock: AWS EventStream via generator ──────────────────────────
-        const gen = streamBedrock(
-          newMessages.map(m => ({ role: m.role, content: m.content })),
-          model,
-          bedrockCreds.region,
-          bedrockCreds.accessKeyId,
-          bedrockCreds.secretAccessKey,
-          systemPrompt,
-          ctrl.signal,
-        );
-        for await (const chunk of gen) {
-          if (chunk.type === 'text') {
-            assistantText += chunk.text;
-            setMessages(prev => {
-              const next = [...prev];
-              next[next.length - 1] = { role: 'assistant', content: assistantText };
-              return next;
-            });
-          } else if (chunk.type === 'error') {
-            throw new Error(chunk.error);
-          }
-        }
-      } else {
-        // ── Anthropic: SSE streaming ────────────────────────────────────────
-        const resp = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model,
-            max_tokens: 4096,
-            stream: true,
-            system: systemPrompt,
-            messages: newMessages.map(m => ({ role: m.role, content: m.content })),
-          }),
-          signal: ctrl.signal,
-        });
+      const stream = streamChat({
+        provider,
+        model,
+        creds,
+        system: systemPrompt,
+        messages: newMessages.map(m => ({ role: m.role, content: m.content })),
+        signal: ctrl.signal,
+      });
 
-        if (!resp.ok) {
-          const errBody = await resp.text();
-          let msg = `API error ${resp.status}`;
-          try {
-            const parsed = JSON.parse(errBody);
-            msg = parsed?.error?.message ?? msg;
-          } catch { /* use default */ }
-          throw new Error(msg);
-        }
-
-        const reader = resp.body!.getReader();
-        const decoder = new TextDecoder();
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          const chunk = decoder.decode(value, { stream: true });
-          const lines = chunk.split('\n');
-          for (const line of lines) {
-            if (!line.startsWith('data: ')) continue;
-            const data = line.slice(6).trim();
-            if (data === '[DONE]') break;
-            try {
-              const evt = JSON.parse(data);
-              if (evt.type === 'content_block_delta' && evt.delta?.type === 'text_delta') {
-                assistantText += evt.delta.text;
-                setMessages(prev => {
-                  const next = [...prev];
-                  next[next.length - 1] = { role: 'assistant', content: assistantText };
-                  return next;
-                });
-              }
-            } catch { /* skip malformed events */ }
-          }
+      for await (const chunk of stream) {
+        if (chunk.type === 'text') {
+          assistantText += chunk.text;
+          setMessages(prev => {
+            const next = [...prev];
+            next[next.length - 1] = { role: 'assistant', content: assistantText };
+            return next;
+          });
+        } else if (chunk.type === 'error') {
+          throw new Error(chunk.error);
         }
       }
 
@@ -604,9 +543,7 @@ export function ChatPage() {
 
       {apiKeyOk === false && (
         <div className="chat-api-warning">
-          {provider === 'bedrock'
-            ? 'No AWS Bedrock credentials configured.'
-            : 'No Anthropic API key configured.'}{' '}
+          No {providerDef(provider).label} credentials configured.{' '}
           <button type="button" className="btn btn--ghost btn--sm" onClick={() => navigate('/settings')}>
             Configure in Settings →
           </button>

@@ -1045,27 +1045,23 @@ select.form-control {
 /* ─── Settings Page ──────────────────────────────────────────────────────────── */
 .settings-page { max-width: 640px; }
 
+/* Wrapping pill row — scales past the two providers this started with. */
 .provider-toggle {
-  display: inline-flex;
-  gap: 0;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  overflow: hidden;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
 }
 
 .provider-toggle-btn {
-  padding: 0.45rem 1.1rem;
+  padding: 0.45rem 0.9rem;
   font-size: 0.875rem;
   font-weight: 500;
   background: transparent;
   color: var(--text-muted, #8b949e);
-  border: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-
-.provider-toggle-btn + .provider-toggle-btn {
-  border-left: 1px solid var(--border);
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 
 .provider-toggle-btn:hover {
