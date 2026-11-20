@@ -1,97 +1,115 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  ANTHROPIC_MODELS, DEFAULT_MODEL, getStoredModel, hasApiKey,
-  BEDROCK_MODELS, DEFAULT_BEDROCK_MODEL, BEDROCK_REGIONS,
-  getStoredProvider, saveProvider, getStoredBedrockCreds, saveBedrockCreds, clearBedrockCreds, hasBedrockCreds,
-  type AIProvider,
+  PROVIDERS, providerDef, getStoredProvider, saveProvider,
+  getProviderCreds, saveProviderCreds, clearProviderCreds, isProviderConfigured,
+  getStoredModel, saveModel,
+  type AIProvider, type ModelOption, type ProviderCreds, type ProviderField,
 } from '../utils/settings';
+import { fetchModels } from '../utils/aiStream';
 
-declare const CRIBL_API_URL: string;
-
-const KV_KEY_PATH = 'anthropicApiKey';
-const KV_MODEL_PATH = 'anthropicModel';
-
-function kvUrl(path: string) {
-  return `${CRIBL_API_URL}/kvstore/${path}`;
-}
+/** Sentinel value for the "type your own model ID" option in the model dropdown. */
+const CUSTOM_MODEL = '__custom__';
 
 export function SettingsPage() {
   const navigate = useNavigate();
 
-  // Provider
   const [provider, setProvider] = useState<AIProvider>('anthropic');
+  const [values, setValues] = useState<ProviderCreds>({});
+  const [configured, setConfigured] = useState<boolean | null>(null);
+  /** Whether any credential field has been edited since it was loaded or saved. */
+  const [dirty, setDirty] = useState(false);
 
-  // Anthropic
-  const [keyInput, setKeyInput] = useState('');
-  const [anthropicModel, setAnthropicModel] = useState(DEFAULT_MODEL);
-  const [keyConfigured, setKeyConfigured] = useState<boolean | null>(null);
+  const [model, setModel] = useState('');
+  const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
+  const [customModel, setCustomModel] = useState(false);
+  const [loadingModels, setLoadingModels] = useState(false);
 
-  // Bedrock
-  const [bedrockRegion, setBedrockRegion] = useState('us-east-1');
-  const [bedrockAccessKeyId, setBedrockAccessKeyId] = useState('');
-  const [bedrockSecretAccessKey, setBedrockSecretAccessKey] = useState('');
-  const [bedrockConfigured, setBedrockConfigured] = useState<boolean | null>(null);
-  const [bedrockModel, setBedrockModel] = useState(DEFAULT_BEDROCK_MODEL);
-
-  // Shared
   const [saving, setSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'success' | 'error'>('idle');
   const [saveMessage, setSaveMessage] = useState('');
 
-  useEffect(() => {
-    async function load() {
-      const [p, configured, storedModel, credsOk, creds] = await Promise.all([
-        getStoredProvider(),
-        hasApiKey(),
-        getStoredModel(),
-        hasBedrockCreds(),
-        getStoredBedrockCreds(),
-      ]);
-      setProvider(p);
-      setKeyConfigured(configured);
-      setAnthropicModel(storedModel);
-      setBedrockConfigured(credsOk);
-      setBedrockRegion(creds.region);
+  const def = providerDef(provider);
+
+  /** Load everything for one provider: creds (non-secret only), model, configured state. */
+  const loadProvider = useCallback(async (p: AIProvider) => {
+    const d = providerDef(p);
+    const [creds, storedModel, ok] = await Promise.all([
+      getProviderCreds(p),
+      getStoredModel(p),
+      isProviderConfigured(p),
+    ]);
+
+    // Never pre-fill secrets back into the DOM — the sentinel badge shows they exist.
+    const visible: ProviderCreds = {};
+    for (const f of d.fields) {
+      visible[f.key] = f.secret ? '' : creds[f.key] ?? '';
     }
-    load();
+
+    setValues(visible);
+    setDirty(false);
+    setConfigured(ok);
+    setModel(storedModel);
+    setModelOptions(d.models);
+    setCustomModel(!d.models.some(m => m.id === storedModel));
   }, []);
 
+  useEffect(() => {
+    async function init() {
+      const p = await getStoredProvider();
+      setProvider(p);
+      await loadProvider(p);
+    }
+    init();
+  }, [loadProvider]);
+
   async function handleProviderChange(p: AIProvider) {
+    if (p === provider) return;
     setProvider(p);
     setSaveStatus('idle');
-    await saveProvider(p);
+    setConfigured(null);
+    await Promise.all([
+      saveProvider(p).catch((e: Error) => {
+        setSaveStatus('error');
+        setSaveMessage(e.message);
+      }),
+      loadProvider(p),
+    ]);
   }
 
-  // ── Anthropic handlers ────────────────────────────────────────────────────
+  function setField(key: string, value: string) {
+    setValues(prev => ({ ...prev, [key]: value }));
+    setDirty(true);
+    setSaveStatus('idle');
+  }
 
-  async function handleSaveAnthropicKey() {
-    if (!keyInput.trim()) return;
+  /** Required fields the user still has to fill before credentials can be saved. */
+  function missingFields(): ProviderField[] {
+    return def.fields.filter(f => {
+      if (f.optional) return false;
+      // An already-stored secret does not need to be re-entered.
+      if (f.secret && configured) return false;
+      return (values[f.key] ?? '').trim() === '';
+    });
+  }
+
+  async function handleSaveCreds() {
+    if (!dirty || missingFields().length > 0) return;
     setSaving(true);
     setSaveStatus('idle');
     try {
-      const [keyRes, sentinelRes, modelRes] = await Promise.all([
-        fetch(kvUrl(KV_KEY_PATH) + '?encrypted=true', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'text/plain' },
-          body: keyInput.trim(),
-        }),
-        fetch(kvUrl('anthropicApiKeySet'), {
-          method: 'PUT',
-          headers: { 'Content-Type': 'text/plain' },
-          body: 'true',
-        }),
-        fetch(kvUrl(KV_MODEL_PATH), {
-          method: 'PUT',
-          headers: { 'Content-Type': 'text/plain' },
-          body: anthropicModel,
-        }),
-      ]);
-      if (!keyRes.ok || !sentinelRes.ok || !modelRes.ok) throw new Error('Failed to save settings.');
-      setKeyConfigured(true);
-      setKeyInput('');
-      setSaveStatus('success');
-      setSaveMessage('Anthropic settings saved.');
+      await saveProviderCreds(provider, values);
+      const ok = await isProviderConfigured(provider);
+      setConfigured(ok);
+      setDirty(false);
+      // Clear the secret inputs — they are stored now.
+      setValues(prev => {
+        const next = { ...prev };
+        for (const f of def.fields) if (f.secret) next[f.key] = '';
+        return next;
+      });
+      setSaveStatus(ok ? 'success' : 'error');
+      setSaveMessage(ok ? `${def.label} credentials saved.` : 'Saved, but some required fields are still missing.');
     } catch (e) {
       setSaveStatus('error');
       setSaveMessage((e as Error).message);
@@ -100,88 +118,18 @@ export function SettingsPage() {
     }
   }
 
-  async function handleSaveAnthropicModel() {
+  async function handleClearCreds() {
     setSaving(true);
     try {
-      await fetch(kvUrl(KV_MODEL_PATH), {
-        method: 'PUT',
-        headers: { 'Content-Type': 'text/plain' },
-        body: anthropicModel,
+      await clearProviderCreds(provider);
+      setConfigured(false);
+      setValues(prev => {
+        const next = { ...prev };
+        for (const f of def.fields) if (f.secret) next[f.key] = '';
+        return next;
       });
       setSaveStatus('success');
-      setSaveMessage('Model preference saved.');
-    } catch {
-      setSaveStatus('error');
-      setSaveMessage('Failed to save model.');
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function handleClearAnthropicKey() {
-    setSaving(true);
-    try {
-      await Promise.all([
-        fetch(kvUrl(KV_KEY_PATH), { method: 'DELETE' }),
-        fetch(kvUrl('anthropicApiKeySet'), { method: 'DELETE' }),
-      ]);
-      setKeyConfigured(false);
-      setSaveStatus('success');
-      setSaveMessage('API key removed.');
-    } catch {
-      setSaveStatus('error');
-      setSaveMessage('Failed to remove key.');
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  // ── Bedrock handlers ──────────────────────────────────────────────────────
-
-  async function handleSaveBedrockCreds() {
-    if (!bedrockAccessKeyId.trim() || !bedrockSecretAccessKey.trim()) return;
-    setSaving(true);
-    setSaveStatus('idle');
-    try {
-      await saveBedrockCreds(bedrockRegion, bedrockAccessKeyId.trim(), bedrockSecretAccessKey.trim());
-      setBedrockConfigured(true);
-      setBedrockAccessKeyId('');
-      setBedrockSecretAccessKey('');
-      setSaveStatus('success');
-      setSaveMessage('Bedrock credentials saved.');
-    } catch (e) {
-      setSaveStatus('error');
-      setSaveMessage((e as Error).message);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function handleSaveBedrockModel() {
-    setSaving(true);
-    try {
-      await fetch(kvUrl(KV_MODEL_PATH), {
-        method: 'PUT',
-        headers: { 'Content-Type': 'text/plain' },
-        body: bedrockModel,
-      });
-      setSaveStatus('success');
-      setSaveMessage('Model preference saved.');
-    } catch {
-      setSaveStatus('error');
-      setSaveMessage('Failed to save model.');
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function handleClearBedrockCreds() {
-    setSaving(true);
-    try {
-      await clearBedrockCreds();
-      setBedrockConfigured(false);
-      setSaveStatus('success');
-      setSaveMessage('Bedrock credentials removed.');
+      setSaveMessage(`${def.label} credentials removed.`);
     } catch {
       setSaveStatus('error');
       setSaveMessage('Failed to remove credentials.');
@@ -189,6 +137,74 @@ export function SettingsPage() {
       setSaving(false);
     }
   }
+
+  async function handleSaveModel() {
+    setSaving(true);
+    try {
+      await saveModel(provider, model);
+      setSaveStatus('success');
+      setSaveMessage('Model preference saved.');
+    } catch (e) {
+      setSaveStatus('error');
+      setSaveMessage((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  /** Replace the curated list with what these credentials can actually reach. */
+  async function handleRefreshModels() {
+    setLoadingModels(true);
+    setSaveStatus('idle');
+    try {
+      const ids = await fetchModels(provider);
+      if (ids.length === 0) throw new Error('No models returned.');
+      setModelOptions(ids.map(id => ({ id, label: id })));
+      setCustomModel(!ids.includes(model));
+      setSaveStatus('success');
+      setSaveMessage(`Loaded ${ids.length} models from ${def.label}.`);
+    } catch (e) {
+      setSaveStatus('error');
+      setSaveMessage((e as Error).message);
+    } finally {
+      setLoadingModels(false);
+    }
+  }
+
+  function renderField(f: ProviderField) {
+    const value = values[f.key] ?? '';
+    const label = f.secret && configured ? `Replace ${f.label}` : f.label;
+
+    return (
+      <div className="form-field" key={f.key}>
+        <label className="form-label">{label}</label>
+        {f.options ? (
+          <select
+            className="form-control"
+            value={value}
+            onChange={e => setField(f.key, e.target.value)}
+          >
+            {f.options.map(o => (
+              <option key={o} value={o}>{o}</option>
+            ))}
+          </select>
+        ) : (
+          <input
+            type={f.secret ? 'password' : 'text'}
+            className="form-control"
+            placeholder={f.placeholder}
+            value={value}
+            onChange={e => setField(f.key, e.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+          />
+        )}
+        {f.hint && <p className="form-hint">{f.hint}</p>}
+      </div>
+    );
+  }
+
+  const missing = missingFields();
 
   return (
     <div className="page settings-page">
@@ -200,197 +216,129 @@ export function SettingsPage() {
         <p className="page-subtitle">Configure your AI provider credentials for the AI Collector Builder.</p>
       </div>
 
-      {/* Provider toggle */}
+      {/* Provider picker */}
       <div className="form-section">
         <h3 className="form-section-title">AI Provider</h3>
         <div className="provider-toggle">
-          <button
-            type="button"
-            className={`provider-toggle-btn${provider === 'anthropic' ? ' provider-toggle-btn--active' : ''}`}
-            onClick={() => handleProviderChange('anthropic')}
-          >
-            Anthropic
-          </button>
-          <button
-            type="button"
-            className={`provider-toggle-btn${provider === 'bedrock' ? ' provider-toggle-btn--active' : ''}`}
-            onClick={() => handleProviderChange('bedrock')}
-          >
-            AWS Bedrock
-          </button>
+          {PROVIDERS.map(p => (
+            <button
+              key={p.id}
+              type="button"
+              className={`provider-toggle-btn${provider === p.id ? ' provider-toggle-btn--active' : ''}`}
+              onClick={() => handleProviderChange(p.id)}
+            >
+              {p.label}
+            </button>
+          ))}
         </div>
       </div>
 
-      {/* ── Anthropic section ──────────────────────────────────────────────── */}
-      {provider === 'anthropic' && (
-        <>
-          <div className="form-section">
-            <h3 className="form-section-title">Anthropic API Key</h3>
-            <div className="key-status-row">
-              <span className={`key-status-badge ${keyConfigured ? 'key-status-badge--set' : 'key-status-badge--unset'}`}>
-                {keyConfigured === null ? 'Checking…' : keyConfigured ? 'API key configured ✓' : 'No API key set'}
-              </span>
-              {keyConfigured && (
-                <button type="button" className="btn btn--ghost btn--sm" onClick={handleClearAnthropicKey} disabled={saving}>
-                  Remove key
-                </button>
-              )}
-            </div>
-            <div className="form-field">
-              <label className="form-label">{keyConfigured ? 'Replace API Key' : 'API Key'}</label>
-              <div className="url-fetch-row">
-                <input
-                  type="password"
-                  className="form-control"
-                  placeholder="sk-ant-api03-…"
-                  value={keyInput}
-                  onChange={e => { setKeyInput(e.target.value); setSaveStatus('idle'); }}
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-                <button
-                  type="button"
-                  className="btn btn--primary"
-                  onClick={handleSaveAnthropicKey}
-                  disabled={saving || !keyInput.trim()}
-                >
-                  {saving ? 'Saving…' : 'Save'}
-                </button>
-              </div>
-              <p className="form-hint">
-                Stored securely in the Cribl KV store. The key is injected by the platform proxy — it never appears in browser requests.{' '}
-                <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer" className="inline-link">
-                  Get a key ↗
-                </a>
-              </p>
-            </div>
-          </div>
+      {/* Credentials */}
+      <div className="form-section">
+        <h3 className="form-section-title">{def.credsTitle}</h3>
+        <div className="key-status-row">
+          <span className={`key-status-badge ${configured ? 'key-status-badge--set' : 'key-status-badge--unset'}`}>
+            {configured === null ? 'Checking…' : configured ? 'Credentials configured ✓' : 'Not configured'}
+          </span>
+          {configured && (
+            <button type="button" className="btn btn--ghost btn--sm" onClick={handleClearCreds} disabled={saving}>
+              Remove credentials
+            </button>
+          )}
+        </div>
 
-          <div className="form-section">
-            <h3 className="form-section-title">Model</h3>
-            <div className="form-field">
-              <label className="form-label">Claude Model</label>
-              <div className="url-fetch-row">
-                <select
-                  className="form-control"
-                  value={anthropicModel}
-                  onChange={e => { setAnthropicModel(e.target.value); setSaveStatus('idle'); }}
-                >
-                  {ANTHROPIC_MODELS.map(m => (
-                    <option key={m.id} value={m.id}>{m.label}</option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  className="btn btn--secondary"
-                  onClick={handleSaveAnthropicModel}
-                  disabled={saving}
-                >
-                  Save
-                </button>
-              </div>
-            </div>
-          </div>
-        </>
-      )}
+        {def.fields.map(renderField)}
 
-      {/* ── Bedrock section ────────────────────────────────────────────────── */}
-      {provider === 'bedrock' && (
-        <>
-          <div className="form-section">
-            <h3 className="form-section-title">AWS Credentials</h3>
-            <div className="key-status-row">
-              <span className={`key-status-badge ${bedrockConfigured ? 'key-status-badge--set' : 'key-status-badge--unset'}`}>
-                {bedrockConfigured === null ? 'Checking…' : bedrockConfigured ? 'Credentials configured ✓' : 'No credentials set'}
-              </span>
-              {bedrockConfigured && (
-                <button type="button" className="btn btn--ghost btn--sm" onClick={handleClearBedrockCreds} disabled={saving}>
-                  Remove credentials
-                </button>
-              )}
-            </div>
+        <div className="url-fetch-row">
+          <button
+            type="button"
+            className="btn btn--primary"
+            onClick={handleSaveCreds}
+            disabled={saving || !dirty || missing.length > 0}
+            title={missing.length > 0 ? `Required: ${missing.map(f => f.label).join(', ')}` : undefined}
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
 
-            <div className="form-field">
-              <label className="form-label">AWS Region</label>
-              <select
-                className="form-control"
-                value={bedrockRegion}
-                onChange={e => { setBedrockRegion(e.target.value); setSaveStatus('idle'); }}
+        <p className="form-hint">
+          Stored in the Cribl KV store, encrypted. Keys are injected by the platform proxy — they never appear in
+          browser requests.{' '}
+          {def.keyDocsUrl && (
+            <a href={def.keyDocsUrl} target="_blank" rel="noopener noreferrer" className="inline-link">
+              {def.keyDocsLabel ?? 'Docs ↗'}
+            </a>
+          )}
+        </p>
+        {def.note && <p className="form-hint">{def.note}</p>}
+      </div>
+
+      {/* Model */}
+      <div className="form-section">
+        <h3 className="form-section-title">Model</h3>
+        <div className="form-field">
+          <label className="form-label">{def.modelLabel}</label>
+
+          <select
+            className="form-control"
+            value={customModel ? CUSTOM_MODEL : model}
+            onChange={e => {
+              const v = e.target.value;
+              if (v === CUSTOM_MODEL) {
+                setCustomModel(true);
+              } else {
+                setCustomModel(false);
+                setModel(v);
+              }
+              setSaveStatus('idle');
+            }}
+          >
+            {modelOptions.map(m => (
+              <option key={m.id} value={m.id}>{m.label}</option>
+            ))}
+            <option value={CUSTOM_MODEL}>Custom…</option>
+          </select>
+
+          {customModel && (
+            <input
+              type="text"
+              className="form-control"
+              placeholder="model-id"
+              value={model}
+              onChange={e => { setModel(e.target.value); setSaveStatus('idle'); }}
+              autoComplete="off"
+              spellCheck={false}
+              style={{ marginTop: '0.5rem' }}
+            />
+          )}
+
+          <div className="url-fetch-row" style={{ marginTop: '0.5rem' }}>
+            <button
+              type="button"
+              className="btn btn--secondary"
+              onClick={handleSaveModel}
+              disabled={saving || !model.trim()}
+            >
+              Save
+            </button>
+            {def.canListModels && (
+              <button
+                type="button"
+                className="btn btn--ghost"
+                onClick={handleRefreshModels}
+                disabled={loadingModels || !configured}
+                title={configured ? 'List the models your credentials can reach' : 'Save credentials first'}
               >
-                {BEDROCK_REGIONS.map(r => (
-                  <option key={r} value={r}>{r}</option>
-                ))}
-              </select>
-            </div>
-
-            <div className="form-field">
-              <label className="form-label">{bedrockConfigured ? 'Replace Access Key ID' : 'Access Key ID'}</label>
-              <input
-                type="text"
-                className="form-control"
-                placeholder="AKIA…"
-                value={bedrockAccessKeyId}
-                onChange={e => { setBedrockAccessKeyId(e.target.value); setSaveStatus('idle'); }}
-                autoComplete="off"
-                spellCheck={false}
-              />
-            </div>
-
-            <div className="form-field">
-              <label className="form-label">{bedrockConfigured ? 'Replace Secret Access Key' : 'Secret Access Key'}</label>
-              <div className="url-fetch-row">
-                <input
-                  type="password"
-                  className="form-control"
-                  placeholder="••••••••"
-                  value={bedrockSecretAccessKey}
-                  onChange={e => { setBedrockSecretAccessKey(e.target.value); setSaveStatus('idle'); }}
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-                <button
-                  type="button"
-                  className="btn btn--primary"
-                  onClick={handleSaveBedrockCreds}
-                  disabled={saving || !bedrockAccessKeyId.trim() || !bedrockSecretAccessKey.trim()}
-                >
-                  {saving ? 'Saving…' : 'Save'}
-                </button>
-              </div>
-              <p className="form-hint">
-                IAM user requires the <code>bedrock:InvokeModelWithResponseStream</code> permission.
-                Credentials are stored in the Cribl KV store and never sent directly in browser requests.
-              </p>
-            </div>
+                {loadingModels ? 'Loading…' : 'Refresh from provider'}
+              </button>
+            )}
           </div>
 
-          <div className="form-section">
-            <h3 className="form-section-title">Model</h3>
-            <div className="form-field">
-              <label className="form-label">Bedrock Model</label>
-              <div className="url-fetch-row">
-                <select
-                  className="form-control"
-                  value={bedrockModel}
-                  onChange={e => { setBedrockModel(e.target.value); setSaveStatus('idle'); }}
-                >
-                  {BEDROCK_MODELS.map(m => (
-                    <option key={m.id} value={m.id}>{m.label}</option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  className="btn btn--secondary"
-                  onClick={handleSaveBedrockModel}
-                  disabled={saving}
-                >
-                  Save
-                </button>
-              </div>
-            </div>
-          </div>
-        </>
-      )}
+          <p className="form-hint">
+            Model IDs change often. Use Refresh to list what your credentials can reach, or pick Custom… to enter an ID.
+          </p>
+        </div>
+      </div>
 
       {saveStatus === 'success' && (
         <p className="push-result push-result--success">{saveMessage}</p>
