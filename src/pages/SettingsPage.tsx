@@ -68,7 +68,13 @@ export function SettingsPage() {
     setProvider(p);
     setSaveStatus('idle');
     setConfigured(null);
-    await Promise.all([saveProvider(p), loadProvider(p)]);
+    await Promise.all([
+      saveProvider(p).catch((e: Error) => {
+        setSaveStatus('error');
+        setSaveMessage(e.message);
+      }),
+      loadProvider(p),
+    ]);
   }
 
   function setField(key: string, value: string) {
@@ -138,9 +144,9 @@ export function SettingsPage() {
       await saveModel(provider, model);
       setSaveStatus('success');
       setSaveMessage('Model preference saved.');
-    } catch {
+    } catch (e) {
       setSaveStatus('error');
-      setSaveMessage('Failed to save model.');
+      setSaveMessage((e as Error).message);
     } finally {
       setSaving(false);
     }

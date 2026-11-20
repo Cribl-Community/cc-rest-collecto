@@ -195,7 +195,7 @@ export async function getStoredProvider(): Promise<AIProvider> {
 }
 
 export async function saveProvider(provider: AIProvider): Promise<void> {
-  await kvPut(KV_PROVIDER_PATH, provider);
+  if (!(await kvPut(KV_PROVIDER_PATH, provider))) throw new Error('Failed to save provider selection.');
 }
 
 /**
@@ -216,22 +216,30 @@ export async function getProviderCreds(id: AIProvider): Promise<ProviderCreds> {
 /**
  * Persist credential values. Blank secrets are left untouched so the user can
  * edit a non-secret field (region, API version) without re-entering their key.
- * The sentinel is only raised once every required secret has been supplied.
+ *
+ * Throws if any write fails. The sentinel is only raised after every write has
+ * succeeded and every required secret has been supplied, so a failed secret
+ * write can never leave the provider marked as configured.
  */
 export async function saveProviderCreds(id: AIProvider, values: ProviderCreds): Promise<void> {
   const def = providerDef(id);
-  await Promise.all(
+  const results = await Promise.all(
     def.fields.flatMap(f => {
       const value = (values[f.key] ?? '').trim();
       if (f.secret) return value ? [kvPutEncrypted(f.key, value)] : [];
       return [kvPut(f.key, value)];
     }),
   );
+  if (results.some(ok => !ok)) {
+    throw new Error(`Failed to save ${def.label} credentials. Please try again.`);
+  }
 
   const secretsSupplied = def.fields
     .filter(f => f.secret && !f.optional)
     .every(f => (values[f.key] ?? '').trim() !== '');
-  if (secretsSupplied) await kvPut(def.sentinelKey, 'true');
+  if (secretsSupplied && !(await kvPut(def.sentinelKey, 'true'))) {
+    throw new Error(`Saved ${def.label} credentials, but failed to mark them as configured. Please try again.`);
+  }
 }
 
 export async function clearProviderCreds(id: AIProvider): Promise<void> {
@@ -268,5 +276,5 @@ export async function getStoredModel(id: AIProvider): Promise<string> {
 }
 
 export async function saveModel(id: AIProvider, model: string): Promise<void> {
-  await kvPut(providerDef(id).modelKey, model.trim());
+  if (!(await kvPut(providerDef(id).modelKey, model.trim()))) throw new Error('Failed to save model.');
 }

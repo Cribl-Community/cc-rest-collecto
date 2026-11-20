@@ -386,16 +386,30 @@ export function ChatPage() {
         }
       }
 
+      // Never keep an empty assistant turn: providers reject it on the next request.
+      if (!assistantText) {
+        dropEmptyAssistantTurn();
+        return;
+      }
+
       // Auto-save project after each completed response
       autoSaveProject(messagesRef.current);
     } catch (e) {
+      dropEmptyAssistantTurn();
       if ((e as Error).name === 'AbortError') return;
       setError((e as Error).message);
-      setMessages(prev => prev.filter((_, i) => i < prev.length - 1 || prev[prev.length - 1].content !== ''));
     } finally {
       setStreaming(false);
       abortRef.current = null;
     }
+  }
+
+  /** Remove a trailing assistant placeholder that never received any text. */
+  function dropEmptyAssistantTurn() {
+    setMessages(prev => {
+      const last = prev[prev.length - 1];
+      return last?.role === 'assistant' && last.content === '' ? prev.slice(0, -1) : prev;
+    });
   }
 
   async function autoSaveProject(currentMessages: Message[]) {

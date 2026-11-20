@@ -109,6 +109,9 @@ async function* streamAnthropic(args: StreamArgs): AsyncGenerator<ChatChunk> {
 
 // ── Google Gemini ─────────────────────────────────────────────────────────────
 
+/** Finish reasons that mean the model completed normally. */
+const GEMINI_OK_FINISH = new Set(['STOP', 'MAX_TOKENS', 'FINISH_REASON_UNSPECIFIED']);
+
 /** Gemini names the assistant role `model` and carries the system prompt separately. */
 async function* streamGemini(args: StreamArgs): AsyncGenerator<ChatChunk> {
   const endpoint =
@@ -133,25 +136,51 @@ async function* streamGemini(args: StreamArgs): AsyncGenerator<ChatChunk> {
     return;
   }
 
+  let gotText = false;
+  let finishReason: string | undefined;
+  let blockReason: string | undefined;
+
   for await (const line of sseLines(resp.body)) {
     if (!line.startsWith('data:')) continue;
     const data = line.slice(5).trim();
     if (!data || data === '[DONE]') continue;
     try {
       const evt = JSON.parse(data) as {
-        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> }; finishReason?: string }>;
+        promptFeedback?: { blockReason?: string };
         error?: { message?: string };
       };
       if (evt.error?.message) {
         yield { type: 'error', error: `Gemini stream error: ${evt.error.message}` };
         return;
       }
-      for (const part of evt.candidates?.[0]?.content?.parts ?? []) {
-        if (part.text) yield { type: 'text', text: part.text };
+      if (evt.promptFeedback?.blockReason) blockReason = evt.promptFeedback.blockReason;
+      const candidate = evt.candidates?.[0];
+      if (candidate?.finishReason) finishReason = candidate.finishReason;
+      for (const part of candidate?.content?.parts ?? []) {
+        if (part.text) {
+          gotText = true;
+          yield { type: 'text', text: part.text };
+        }
       }
     } catch {
       // skip malformed events
     }
+  }
+
+  // A blocked prompt or response (SAFETY, RECITATION, PROHIBITED_CONTENT, …)
+  // ends the stream with no usable text — surface why instead of a blank reply.
+  if (blockReason) {
+    yield { type: 'error', error: `Gemini blocked the prompt (${blockReason}).` };
+    return;
+  }
+  if (finishReason && !GEMINI_OK_FINISH.has(finishReason)) {
+    yield { type: 'error', error: `Gemini blocked the response (${finishReason}).` };
+    return;
+  }
+  if (!gotText) {
+    yield { type: 'error', error: 'Gemini returned an empty response.' };
+    return;
   }
 
   yield { type: 'done' };
